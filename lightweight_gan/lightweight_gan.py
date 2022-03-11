@@ -32,6 +32,9 @@ from einops import rearrange, reduce, repeat
 
 from adabelief_pytorch import AdaBelief
 
+import wandb
+
+
 # asserts
 
 assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
@@ -775,6 +778,7 @@ class LightweightGAN(nn.Module):
         super().__init__()
         self.latent_dim = latent_dim
         self.image_size = image_size
+        wandb.config.update({"attn_res_layers": attn_res_layers, "lr": 0.0002})
 
         G_kwargs = dict(
             image_size = image_size,
@@ -885,6 +889,8 @@ class Trainer():
         *args,
         **kwargs
     ):
+        wandb.init(project="headgore", entity="stabs")
+        wandb.config.update({"batch_size":batch_size, "gradient_accumulate_every":gradient_accumulate_every, "amp":amp})
         self.GAN_params = [args, kwargs]
         self.GAN = None
 
@@ -970,7 +976,7 @@ class Trainer():
     @property
     def checkpoint_num(self):
         return floor(self.steps // self.save_every)
-        
+
     def init_GAN(self):
         args, kwargs = self.GAN_params
 
@@ -1150,6 +1156,8 @@ class Trainer():
             self.D_scaler.scale(disc_loss).backward()
             total_disc_loss += divergence
 
+            wandb.log({"real_output_loss":real_output_loss, "fake_output_loss":fake_output_loss, "divergence":divergence, "disc_loss":disc_loss})
+
         self.last_recon_loss = aux_loss.item()
         self.d_loss = float(total_disc_loss.item() / self.gradient_accumulate_every)
         self.D_scaler.step(self.GAN.D_opt)
@@ -1190,7 +1198,9 @@ class Trainer():
 
             gen_loss.register_hook(raise_if_nan)
             self.G_scaler.scale(gen_loss).backward()
-            total_gen_loss += loss 
+            total_gen_loss += loss
+            wandb.log({"gen_loss":gen_loss, "total_gen_loss":total_gen_loss})
+
 
         self.g_loss = float(total_gen_loss.item() / self.gradient_accumulate_every)
         self.G_scaler.step(self.GAN.G_opt)
@@ -1239,7 +1249,7 @@ class Trainer():
 
         ext = self.image_extension
         num_rows = num_image_tiles
-    
+
         latent_dim = self.GAN.latent_dim
         image_size = self.GAN.image_size
 
@@ -1251,7 +1261,7 @@ class Trainer():
 
         generated_images = self.generate_(self.GAN.G, latents)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
-        
+
         # moving averages
 
         generated_images = self.generate_(self.GAN.GE, latents)
@@ -1391,11 +1401,11 @@ class Trainer():
             generated_images = self.generate_(self.GAN.GE, interp_latents)
             images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
             pil_image = transforms.ToPILImage()(images_grid.cpu())
-            
+
             if self.transparent:
                 background = Image.new('RGBA', pil_image.size, (255, 255, 255))
                 pil_image = Image.alpha_composite(background, pil_image)
-                
+
             frames.append(pil_image)
 
         frames[0].save(str(self.results_dir / self.name / f'{str(num)}.gif'), save_all=True, append_images=frames[1:], duration=80, loop=0, optimize=True)
@@ -1417,6 +1427,7 @@ class Trainer():
 
         data = [d for d in data if exists(d[1])]
         log = ' | '.join(map(lambda n: f'{n[0]}: {n[1]:.2f}', data))
+        wandb.log(data)
         print(log)
 
     def model_name(self, num):
